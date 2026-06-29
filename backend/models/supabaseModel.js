@@ -194,10 +194,10 @@ export function createModel(tableName, opts = {}) {
           if (!this._includePassword && data.password) delete data.password;
           return new ModelInstance(this._table, data);
         },
-        async lean() {
-          const inst = await this.exec();
-          return inst ? inst.toObject() : null;
-        },
+        // async lean() {
+        //   const inst = await this.exec();
+        //   return inst ? inst.toObject() : null;
+        // },
         then(resolve, reject) {
           return this.exec().then(resolve, reject);
         },
