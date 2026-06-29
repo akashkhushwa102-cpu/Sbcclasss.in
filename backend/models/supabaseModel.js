@@ -73,6 +73,63 @@ class Query {
   }
 }
 
+function getComparableValue(value, row, now = new Date()) {
+  if (typeof value === 'string' && value.startsWith('$')) {
+    return row[value.slice(1)];
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (value.$literal !== undefined) return value.$literal;
+    if (value.$now) return now;
+    const operator = Object.keys(value)[0];
+    if (!operator) return value;
+    const args = value[operator];
+    switch (operator) {
+      case '$add':
+        return (Array.isArray(args) ? args : [args]).reduce((sum, item) => sum + Number(getComparableValue(item, row, now) || 0), 0);
+      case '$multiply':
+        return (Array.isArray(args) ? args : [args]).reduce((product, item) => product * Number(getComparableValue(item, row, now) || 0), 1);
+      case '$lte':
+        return getComparableValue(args[0], row, now) <= getComparableValue(args[1], row, now);
+      case '$lt':
+        return getComparableValue(args[0], row, now) < getComparableValue(args[1], row, now);
+      case '$gte':
+        return getComparableValue(args[0], row, now) >= getComparableValue(args[1], row, now);
+      case '$gt':
+        return getComparableValue(args[0], row, now) > getComparableValue(args[1], row, now);
+      case '$eq':
+        return getComparableValue(args[0], row, now) === getComparableValue(args[1], row, now);
+      default:
+        return value;
+    }
+  }
+  return value;
+}
+
+function matchesFilter(row, filter = {}, now = new Date()) {
+  if (!filter || typeof filter !== 'object' || Array.isArray(filter)) return true;
+
+  return Object.entries(filter).every(([key, condition]) => {
+    if (key === '$expr') return getComparableValue(condition, row, now);
+    if (key === '$and') {
+      return Array.isArray(condition) && condition.every((subFilter) => matchesFilter(row, subFilter, now));
+    }
+    if (key === '$or') {
+      return Array.isArray(condition) && condition.some((subFilter) => matchesFilter(row, subFilter, now));
+    }
+
+    if (condition && typeof condition === 'object' && !Array.isArray(condition)) {
+      if ('$in' in condition) return condition.$in.includes(row[key]);
+      if ('$ne' in condition) return row[key] !== condition.$ne;
+      if ('$lte' in condition) return row[key] <= condition.$lte;
+      if ('$lt' in condition) return row[key] < condition.$lt;
+      if ('$gte' in condition) return row[key] >= condition.$gte;
+      if ('$gt' in condition) return row[key] > condition.$gt;
+    }
+
+    return row[key] === condition;
+  });
+}
+
 export function createModel(tableName, opts = {}) {
   return {
     // find one matching query
@@ -221,6 +278,43 @@ export function createModel(tableName, opts = {}) {
       const { data, error } = await supabase.from(tableName).update(updateData).eq('id', id).select().single();
       if (error) throw error;
       return new ModelInstance(tableName, data);
+    },
+
+    async updateMany(filter = {}, updateData = {}) {
+      const { data, error } = await supabase.from(tableName).select('*');
+      if (error) throw error;
+
+      const matchingRows = (data || []).filter((row) => matchesFilter(row, filter, new Date()));
+      const updatedRows = [];
+
+      for (const row of matchingRows) {
+        const id = row.id || row._id;
+        if (!id) continue;
+
+        const payload = updateData.$set ? { ...updateData.$set } : { ...updateData };
+        if (updateData.$unset) {
+          for (const field of Object.keys(updateData.$unset)) {
+            delete payload[field];
+          }
+        }
+
+        const { data: updatedRow, error: updateError } = await supabase
+          .from(tableName)
+          .update(payload)
+          .eq('id', id)
+          .select()
+          .single();
+
+        if (updateError) throw updateError;
+        updatedRows.push(updatedRow);
+      }
+
+      return {
+        acknowledged: true,
+        matchedCount: matchingRows.length,
+        modifiedCount: updatedRows.length,
+        upsertedCount: 0,
+      };
     },
 
     async delete(id) {
